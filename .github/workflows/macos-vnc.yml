@@ -1,71 +1,79 @@
-name: macOS VNC - CLOUDFLARE
+name: macOS noVNC - CLOUDFLARE
 
 on:
-  workflow_dispatch:
+workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-latest
-    timeout-minutes: 9999
+build:
+runs-on: macos-latest
+timeout-minutes: 360
 
-    steps:
-      - name: Install Cloudflared
-        run: |
-          brew install cloudflare/cloudflare/cloudflared
-          echo "✅ Cloudflared Installed!"
+steps:
+  - name: Install Dependencies
+    run: |
+      brew update
+      brew install tigervnc novnc websockify cloudflare/cloudflare/cloudflared
 
-      - name: Enable VNC/Screen Sharing
-        run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
-          echo "✅ VNC Enabled!"
+  - name: Enable Screen Sharing
+    run: |
+      sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+        -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
 
-      - name: Set VNC Password (Legacy VNC)
-        shell: bash
-        run: |
-          set -e
-          sudo mkdir -p /Library/Preferences
+  - name: Configure VNC Password
+    run: |
+      mkdir -p ~/.vnc
 
-          echo "P@ssw0rd123!" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw P@ssw0rd123!
+      cat > ~/.vnc/passwd.txt << EOF
+      P@ssw0rd123!
+      EOF
 
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
+      vncpasswd -f < ~/.vnc/passwd.txt > ~/.vnc/passwd
+      chmod 600 ~/.vnc/passwd
 
-          HASH=$(python3 - <<'PY'
-          import hashlib
-          print(hashlib.md5(b"P@ssw0rd123!").hexdigest())
-          PY
-          )
+  - name: Start VNC Server
+    run: |
+      /opt/homebrew/bin/Xvnc :1 \
+        -geometry 1440x900 \
+        -depth 24 \
+        -rfbauth ~/.vnc/passwd \
+        -rfbport 5901 \
+        > vnc.log 2>&1 &
 
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(echo "$HASH" | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-          echo "✅ VNC Password Set!"
+      sleep 10
 
-      - name: Start Cloudflare Tunnel
-        run: |
-          echo "============================================"
-          echo "🚀 macOS VNC - CLOUDFLARE TUNNEL"
-          echo "============================================"
-          echo ""
-          cloudflared tunnel --url tcp://localhost:5900 > tunnel.log 2>&1 &
-          sleep 15
-          cat tunnel.log | grep -o 'https://[^[:space:]]*trycloudflare.com' || echo "Check logs for tunnel URL"
-          echo ""
-          echo "✅ TUNNEL STARTED!"
-          echo ""
-          echo "📋 CONNECTION DETAILS:"
-          echo "   PASSWORD: P@ssw0rd123!"
-          echo "   OS: macOS Monterey/Ventura"
-          echo "   Architecture: $(uname -m)"
-          echo "============================================"
+  - name: Start noVNC
+    run: |
+      NOVNC_DIR=$(brew --prefix novnc)/share/novnc
 
-      - name: Keep Session Alive
-        run: |
-          echo "⏳ Session Active - Keeping alive..."
-          while true; do
-            sleep 60
-            echo "✓ Active - $(date '+%H:%M:%S')"
-          done
+      websockify \
+        --web "$NOVNC_DIR" \
+        6080 \
+        localhost:5901 \
+        > websockify.log 2>&1 &
+
+      sleep 5
+
+  - name: Start Cloudflare Tunnel
+    run: |
+      cloudflared tunnel \
+        --url http://localhost:6080 \
+        > tunnel.log 2>&1 &
+
+      sleep 20
+
+      echo ""
+      echo "=========================================="
+      echo "🚀 noVNC READY"
+      echo "=========================================="
+      grep -o 'https://[^[:space:]]*trycloudflare.com' tunnel.log || true
+      echo ""
+      echo "PASSWORD : P@ssw0rd123!"
+      echo "DISPLAY  : :1"
+      echo "=========================================="
+
+  - name: Keep Alive
+    run: |
+      while true; do
+        echo "✓ Active $(date)"
+        sleep 60
+      done
